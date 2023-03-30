@@ -1,0 +1,228 @@
+Description:  >
+  This template deploys a VPC, with a pair of public and private subnets spread
+  across two Availability Zones. It deploys an internet gateway, with a default
+  route on the public subnets. It deploys a pair of NAT gateways (one in each AZ),
+  and default routes for them in the private subnets. Please note, you will be billed 
+  for the AWS resources used if you create a stack from this template.
+  Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  SPDX-License-Identifier: MIT-0
+
+Parameters:
+  EnvironmentName:
+    Description: An environment name that is prefixed to resource names
+    Type: String
+    Default: devsecops-cicd
+
+  EBInstanceType:
+    Type: String
+    Description: "Specify instance type"
+    Default: t2.small
+
+  S3BucketName:
+      Type: String
+      Description: "Bucket Name for configuration for ElasticBeanStalk application"
+      Default: dsop-bucket-0103
+      
+  EBSolutionStack:
+      Type: String
+      Description: "Elastic Beanstalk solution stack name"
+      Default: "64bit Amazon Linux 2 v3.4.4 running Corretto 11"  
+
+Resources:
+  EBServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - elasticbeanstalk.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+            Condition:
+              StringEquals:
+                'sts:ExternalId': 'elasticbeanstalk'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkEnhancedHealth
+        - arn:aws:iam::aws:policy/service-role/AWSElasticBeanstalkService
+      RoleName: !Sub 'eb-service-role-${AWS::StackName}'
+
+  EBEC2Role:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      Path: /
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWebTier
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkMulticontainerDocker
+        - arn:aws:iam::aws:policy/AWSElasticBeanstalkWorkerTier
+      RoleName: !Sub 'eb-ec2-role-${AWS::StackName}'
+  
+  EBEC2InstanceProfile: 
+    Type: "AWS::IAM::InstanceProfile"
+    Properties: 
+      Path: "/"
+      Roles: 
+        - 
+          Ref: "EBEC2Role"
+
+  ##Security groups
+  ELBSecurityGroup:
+    Type: 'AWS::EC2::SecurityGroup'
+    Properties:
+      GroupDescription: Open loadbalancer for access
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          Description: allow port 80 access
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          Description: allow port 443 access
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic by default from Load Balancer
+          IpProtocol: "-1"
+      VpcId: !Ref VPC
+
+  WebSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable HTTP access via user defined port
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+      - SourceSecurityGroupId: !Ref ELBSecurityGroup
+        Description: allow port 80 access
+        FromPort: 80
+        IpProtocol: tcp
+        ToPort: 80
+      SecurityGroupEgress:
+      - CidrIp: 0.0.0.0/0
+        Description: Allow all outbound traffic by default from Instance
+        IpProtocol: "-1"
+
+  MyApplication:
+      Type: AWS::ElasticBeanstalk::Application
+      Properties:
+        Description: AWS Elastic Beanstalk Sample Application
+
+  MyApplicationVersion:
+    Type: AWS::ElasticBeanstalk::ApplicationVersion
+    Properties:
+      ApplicationName: !Ref MyApplication
+      Description: Sample Application Version
+      SourceBundle:
+        S3Bucket: !Ref S3BucketName
+        S3Key: corretto.zip
+
+  ConfigurationTemplate:
+    Type: AWS::ElasticBeanstalk::ConfigurationTemplate
+    DependsOn: [ 'EBServiceRole', 'EBEC2Role' ]
+    Properties:
+      ApplicationName: !Ref MyApplication
+      Description: AWS ElasticBeanstalk Sample Configuration Template
+      SolutionStackName: !Ref EBSolutionStack
+      OptionSettings:
+      - Namespace: 'aws:elasticbeanstalk:environment'
+        OptionName: ServiceRole
+        Value: !Ref EBServiceRole
+      - Namespace: 'aws:autoscaling:launchconfiguration'
+        OptionName: IamInstanceProfile
+        Value: !Ref EBEC2InstanceProfile
+      - Namespace: aws:elasticbeanstalk:environment
+        OptionName: EnvironmentType
+        Value: LoadBalanced 
+      - Namespace: aws:autoscaling:asg
+        OptionName: MinSize
+        Value: "1"
+      - Namespace: aws:autoscaling:asg
+        OptionName: MaxSize
+        Value: "1"
+      - Namespace: aws:autoscaling:trigger
+        OptionName: MeasureName
+        Value: CPUUtilization
+      - Namespace: aws:autoscaling:trigger
+        OptionName: MeasureName
+        Value: CPUUtilization
+      - Namespace: aws:autoscaling:launchconfiguration
+        OptionName: SecurityGroups
+        Value: !Ref WebSecurityGroup
+      - Namespace: "aws:elasticbeanstalk:environment"
+        OptionName: LoadBalancerType
+        Value: application 
+      - Namespace: "aws:elbv2:loadbalancer"
+        OptionName: SecurityGroups
+        Value: !Ref ELBSecurityGroup
+      - Namespace : "aws:elasticbeanstalk:environment:process:default"
+        OptionName : HealthCheckPath
+        Value : "/"
+      - Namespace: "aws:elbv2:loadbalancer"
+        OptionName: IdleTimeout
+        Value : '1800'
+      - Namespace: "aws:elbv2:listener:default"
+        OptionName: Protocol
+        Value : "HTTP"
+      - Namespace: "aws:elbv2:listener:default"
+        OptionName: ListenerEnabled
+        Value : "true"
+      - Namespace : "aws:elasticbeanstalk:command"
+        OptionName: "DeploymentPolicy"
+        Value     : "AllAtOnce"        
+        #####launch configuration
+      - Namespace: "aws:autoscaling:launchconfiguration"
+        OptionName: InstanceType
+        Value: !Ref EBInstanceType
+      ### vpc configuration
+      - Namespace: "aws:ec2:vpc"
+        OptionName: VPCId
+        Value: vpc-0195bb99cf2494fff
+      - Namespace: "aws:ec2:vpc"
+        OptionName: Subnets
+        Value: subnet-02f3328ab38e0fe12	
+      - Namespace: "aws:ec2:vpc"
+        OptionName: ELBScheme
+        Value: public
+      - Namespace: "aws:ec2:vpc"
+        OptionName: ELBSubnets
+        Value: subnet-011e198d38a1c9284,subnet-04edb68247a940bfb	
+
+
+  MyEnvironment:
+    Type: AWS::ElasticBeanstalk::Environment
+    #DependsOn: DBInstance
+    Properties:
+      Description: AWS ElasticBeanstalk Sample Environment
+      ApplicationName: !Ref MyApplication
+      TemplateName: !Ref ConfigurationTemplate
+      VersionLabel: !Ref MyApplicationVersion
+
+Outputs:
+  WebSecurityGroup:
+    Description: Web Security group
+    Value: !Ref WebSecurityGroup
+
+  EBApplication:
+    Description: Elastic Beanstalk MyApplication
+    Value: !Ref MyApplication
+
+  EBEnvironment:
+    Description: Elastic Beanstalk Environment
+    Value: !Ref MyEnvironment
+
+  EBEndPointURL:
+    Description: Elastic Beanstalk EndpointURL
+    Value: !GetAtt MyEnvironment.EndpointURL

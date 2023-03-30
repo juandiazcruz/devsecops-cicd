@@ -1,0 +1,26 @@
+##Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+##SPDX-License-Identifier: MIT-0
+version: 0.2
+phases:
+  install:
+    commands:
+      - echo "install phase....."#
+      - nohup /usr/local/bin/dockerd --host=unix:///var/run/docker.sock --host=tcp://0.0.0.0:2375 --storage-driver=overlay&
+      - timeout 15 sh -c "until docker info; do echo .; sleep 1; done"
+  build:
+    commands: 
+      - docker run -v $(pwd):/zap/wrk/:rw -t owasp/zap2docker-stable zap-baseline.py -t $ApplicationURL -J report.json || true
+  post_build:
+    commands:
+      - | 
+        jq "{ \"messageType\": \"CodeScanReport\", \"reportType\": \"OWASP-Zap\", \
+        \"createdAt\": $(date +\"%Y-%m-%dT%H:%M:%S.%3NZ\"), \"source_repository\": env.CODEBUILD_SOURCE_REPO_URL, \
+        \"source_branch\": env.CODEBUILD_SOURCE_VERSION, \
+        \"build_id\": env.CODEBUILD_BUILD_ID, \
+        \"source_commitid\": env.CODEBUILD_RESOLVED_SOURCE_VERSION, \
+        \"report\": . }" report.json > payload.json
+        aws lambda invoke --function-name ImportVulToSecurityHub --payload file://  owaspzap_scan_report.json && echo "LAMBDA_SUCCEDED" || echo "LAMBDA_FAILED";
+      - if [ $high_alerts != 0 ] || [ $medium_alerts != 0 ]; then echo "there are high or medium alerts.. failing the build" && exit 1; else exit 0; fi
+artifacts:
+  type: zip
+  files: '**/*'
